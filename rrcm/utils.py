@@ -181,7 +181,7 @@ def create_diffusion(**kwargs):
     return diffusion
 
 def create_model(**kwargs):
-    return RCMViT(**kwargs)
+    return rRCMViT(**kwargs)
 
 def setup_for_distributed(is_master):
     """

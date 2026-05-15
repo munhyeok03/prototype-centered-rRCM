@@ -289,7 +289,7 @@ class FinetuneModel(nn.Module):
         idx = (t[:, None].expand(-1, self.num_scales) - self.sigmas[None, :].expand(t.shape[0], -1)).abs().argmin(dim=1)
         return idx
 
-    def forward(self, x, noise_aug=0.0, noise=None):
+    def forward(self, x, noise_aug=0.0, noise=None, return_features=False):
 
         # Augment with Gaussian noise during training
         if noise_aug != 0:
@@ -309,7 +309,10 @@ class FinetuneModel(nn.Module):
         else:
             h = self.forward_features(x, idx)
 
-        return self.linear_head(h)
+        logits = self.linear_head(h)
+        if return_features:
+            return logits, h
+        return logits
 
     def forward_features(self, x, idx):
         t = self.get_sigma(idx) # retrieve `t` (noise level used in diffusion process: xt=x0+t*noise) with timestep `idx`` 
@@ -438,14 +441,140 @@ def entropy(input):
     return xent
 
 
-def train_one_epoch_consistency(accelerator:accelerate.Accelerator, ftmodel, train_data, optimizer, loss_fn, mixup_fn, noise_aug, lbd, eta):
+def _cfg_get(config, name, default):
+    if config is None:
+        return default
+    try:
+        return config.get(name, default)
+    except AttributeError:
+        return getattr(config, name, default)
+
+
+def classifier_weight_prototypes(ftmodel):
+    return ftmodel.linear_head.weight
+
+
+def margin_aware_prototype_loss(
+    features,
+    labels,
+    prototypes,
+    *,
+    temperature=0.1,
+    margin=0.2,
+    normalize_features=True,
+    use_proto_loss=True,
+    use_margin_loss=True,
+):
+    if temperature <= 0:
+        raise ValueError("prototype_temperature must be positive")
+
+    if normalize_features:
+        features = F.normalize(features.flatten(1), dim=1)
+        prototypes = F.normalize(prototypes.flatten(1), dim=1)
+    else:
+        features = features.flatten(1)
+        prototypes = prototypes.flatten(1)
+
+    sim = features @ prototypes.T
+    hard_labels = labels.argmax(dim=1) if labels.ndim == 2 else labels
+
+    proto_loss = features.new_zeros(())
+    if use_proto_loss:
+        sim_scaled = sim / temperature
+        if labels.ndim == 2:
+            proto_loss = -(labels * F.log_softmax(sim_scaled, dim=1)).sum(dim=1).mean()
+        else:
+            proto_loss = F.cross_entropy(sim_scaled, hard_labels)
+
+    margin_loss = features.new_zeros(())
+    if use_margin_loss:
+        sim_correct = sim.gather(1, hard_labels[:, None]).squeeze(1)
+        wrong_sim = sim.masked_fill(
+            F.one_hot(hard_labels, num_classes=sim.shape[1]).bool(),
+            torch.finfo(sim.dtype).min,
+        )
+        sim_wrong_max = wrong_sim.max(dim=1).values
+        margin_loss = F.relu(margin - sim_correct + sim_wrong_max).mean()
+    else:
+        sim_correct = sim.gather(1, hard_labels[:, None]).squeeze(1)
+        wrong_sim = sim.masked_fill(
+            F.one_hot(hard_labels, num_classes=sim.shape[1]).bool(),
+            torch.finfo(sim.dtype).min,
+        )
+        sim_wrong_max = wrong_sim.max(dim=1).values
+
+    proto_margin = sim_correct - sim_wrong_max
+    return {
+        "proto_loss": proto_loss,
+        "margin_loss": margin_loss,
+        "sim_correct": sim_correct.detach().mean(),
+        "sim_wrong_max": sim_wrong_max.detach().mean(),
+        "proto_margin": proto_margin.detach().mean(),
+    }
+
+
+def _feature_consistency_distance(features, chunks):
+    feature_chunks = features.detach().chunk(chunks)
+    if len(feature_chunks) < 2:
+        return features.new_zeros(())
+    f0 = F.normalize(feature_chunks[0].flatten(1), dim=1)
+    distances = []
+    for f in feature_chunks[1:]:
+        f = F.normalize(f.flatten(1), dim=1)
+        distances.append((f0 - f).pow(2).sum(dim=1).sqrt().mean())
+    return torch.stack(distances).mean()
+
+
+def confidence_consistency_loss(logits_m, labels, m=2, beta_conf=0.1, eps=1e-6):
+    """
+    Label-conditioned noisy-view confidence consistency loss.
+    L_conf = mean_i[-log(mean_k p_{y_i,k} + eps) + beta_conf * var_k p_{y_i,k}]
+    Uses m views already computed by the consistency training pass — no extra forward passes.
+    Training-time only; inference path unchanged.
+    """
+    B = logits_m.shape[0] // m
+    p = F.softmax(logits_m, dim=1)               # [m*B, C]
+    p_view = p.view(m, B, -1)                    # [m, B, C]
+    y_hard = labels.argmax(1) if labels.ndim == 2 else labels  # [B]
+    idx = torch.arange(B, device=logits_m.device)
+    p_y = p_view[:, idx, y_hard]                 # [m, B]
+    mean_py = p_y.mean(0)                        # [B]
+    var_py = p_y.var(0, unbiased=False)          # [B]
+    loss = (-torch.log(mean_py + eps) + beta_conf * var_py).mean()
+    return loss, mean_py.detach().mean(), var_py.detach().mean()
+
+
+def train_one_epoch_consistency(accelerator:accelerate.Accelerator, ftmodel, train_data, optimizer, loss_fn, mixup_fn, noise_aug, lbd, eta, margin_config=None):
 
     m = 2
     device = accelerator.device
+    use_margin_aware_loss = bool(_cfg_get(margin_config, "use_margin_aware_loss", False))
+    use_proto_loss = bool(_cfg_get(margin_config, "use_proto_loss", True))
+    use_margin_loss = bool(_cfg_get(margin_config, "use_margin_loss", True))
+    lambda_proto = float(_cfg_get(margin_config, "lambda_proto", 0.1))
+    lambda_margin = float(_cfg_get(margin_config, "lambda_margin", 0.1))
+    prototype_margin = float(_cfg_get(margin_config, "prototype_margin", 0.2))
+    prototype_temperature = float(_cfg_get(margin_config, "prototype_temperature", 0.1))
+    prototype_source = str(_cfg_get(margin_config, "prototype_source", "classifier_weight"))
+    normalize_features = bool(_cfg_get(margin_config, "normalize_features", True))
+    log_geometry_metrics = bool(_cfg_get(margin_config, "log_geometry_metrics", True))
+    use_conf_loss = bool(_cfg_get(margin_config, "use_confidence_consistency_loss", False))
+    lambda_conf = float(_cfg_get(margin_config, "lambda_conf", 0.05))
+    beta_conf_val = float(_cfg_get(margin_config, "beta_conf", 0.1))
+    conf_eps = float(_cfg_get(margin_config, "conf_eps", 1e-6))
 
     avg_acc = []
     avg_loss =  []
     avg_closs = []
+    avg_proto_loss = []
+    avg_margin_loss = []
+    avg_proto_margin = []
+    avg_sim_correct = []
+    avg_sim_wrong_max = []
+    avg_feature_consistency = []
+    avg_conf_loss = []
+    avg_conf_py_mean = []
+    avg_conf_py_var = []
 
     ftmodel.train()
 
@@ -460,11 +589,41 @@ def train_one_epoch_consistency(accelerator:accelerate.Accelerator, ftmodel, tra
         img_repeated = torch.cat([img for i in range(m)], dim=0)
         y_repeated = torch.cat([y for i in range(m)], dim=0)
 
-        logits = ftmodel(img_repeated, noise_aug=noise_aug, noise=None)
+        if use_margin_aware_loss:
+            logits, features = ftmodel(img_repeated, noise_aug=noise_aug, noise=None, return_features=True)
+        else:
+            logits = ftmodel(img_repeated, noise_aug=noise_aug, noise=None)
+            features = None
         clsloss = loss_fn(logits, y_repeated)
         closs = consistency_loss(logits.chunk(m),  lbd=lbd, eta=eta)
 
         loss = clsloss + closs
+
+        margin_metrics = None
+        if use_margin_aware_loss:
+            if prototype_source != "classifier_weight":
+                raise NotImplementedError("Only prototype_source='classifier_weight' is currently supported")
+            base_ftmodel = accelerator.unwrap_model(ftmodel)
+            prototypes = classifier_weight_prototypes(base_ftmodel).to(device=features.device, dtype=features.dtype)
+            margin_metrics = margin_aware_prototype_loss(
+                features,
+                y_repeated,
+                prototypes,
+                temperature=prototype_temperature,
+                margin=prototype_margin,
+                normalize_features=normalize_features,
+                use_proto_loss=use_proto_loss,
+                use_margin_loss=use_margin_loss,
+            )
+            loss = loss + lambda_proto * margin_metrics["proto_loss"] + lambda_margin * margin_metrics["margin_loss"]
+
+        conf_loss_val = logits.new_zeros(())
+        py_mean_diag = logits.new_zeros(())
+        py_var_diag = logits.new_zeros(())
+        if use_conf_loss and mixup_fn is None:
+            conf_loss_val, py_mean_diag, py_var_diag = confidence_consistency_loss(
+                logits, y, m=m, beta_conf=beta_conf_val, eps=conf_eps)
+            loss = loss + lambda_conf * conf_loss_val
 
         optimizer.zero_grad()
         loss.backward()
@@ -475,17 +634,58 @@ def train_one_epoch_consistency(accelerator:accelerate.Accelerator, ftmodel, tra
             acc_all = accelerator.gather(acc)
         clsloss_all = accelerator.gather(clsloss)
         closs_all =  accelerator.gather(closs)
+        if margin_metrics is not None:
+            proto_loss_all = accelerator.gather(margin_metrics["proto_loss"].detach())
+            margin_loss_all = accelerator.gather(margin_metrics["margin_loss"].detach())
+            proto_margin_all = accelerator.gather(margin_metrics["proto_margin"].detach())
+            sim_correct_all = accelerator.gather(margin_metrics["sim_correct"].detach())
+            sim_wrong_max_all = accelerator.gather(margin_metrics["sim_wrong_max"].detach())
+            feature_consistency_all = accelerator.gather(_feature_consistency_distance(features, m).detach())
+        conf_loss_all = accelerator.gather(conf_loss_val.detach())
+        conf_py_mean_all = accelerator.gather(py_mean_diag)
+        conf_py_var_all = accelerator.gather(py_var_diag)
         if accelerator.process_index == 0:
             if mixup_fn is None :
                 avg_acc.append(acc_all.mean().cpu().item())
             avg_loss.append(clsloss_all.mean().cpu().item())
             avg_closs.append(closs_all.mean().cpu().item())
+            if margin_metrics is not None:
+                avg_proto_loss.append(proto_loss_all.mean().cpu().item())
+                avg_margin_loss.append(margin_loss_all.mean().cpu().item())
+                if log_geometry_metrics:
+                    avg_proto_margin.append(proto_margin_all.mean().cpu().item())
+                    avg_sim_correct.append(sim_correct_all.mean().cpu().item())
+                    avg_sim_wrong_max.append(sim_wrong_max_all.mean().cpu().item())
+                    avg_feature_consistency.append(feature_consistency_all.mean().cpu().item())
+            if use_conf_loss and mixup_fn is None:
+                avg_conf_loss.append(conf_loss_all.mean().cpu().item())
+                avg_conf_py_mean.append(conf_py_mean_all.mean().cpu().item())
+                avg_conf_py_var.append(conf_py_var_all.mean().cpu().item())
 
-            print({
+            logging_dict = {
                 "avg_acc": f"{sum(avg_acc)/len(avg_acc)}" if mixup_fn is None else -1,
                 "avg_loss":f"{sum(avg_loss)/len(avg_loss)}",
                 "avg_closs": sum(avg_closs)/len(avg_closs),
-            })
+            }
+            if margin_metrics is not None:
+                logging_dict.update({
+                    "avg_proto_loss": sum(avg_proto_loss)/len(avg_proto_loss),
+                    "avg_margin_loss": sum(avg_margin_loss)/len(avg_margin_loss),
+                })
+                if log_geometry_metrics:
+                    logging_dict.update({
+                        "avg_proto_margin": sum(avg_proto_margin)/len(avg_proto_margin),
+                        "avg_sim_correct": sum(avg_sim_correct)/len(avg_sim_correct),
+                        "avg_sim_wrong_max": sum(avg_sim_wrong_max)/len(avg_sim_wrong_max),
+                        "avg_feature_consistency": sum(avg_feature_consistency)/len(avg_feature_consistency),
+                    })
+            if len(avg_conf_loss) > 0:
+                logging_dict.update({
+                    "avg_conf_loss": sum(avg_conf_loss)/len(avg_conf_loss),
+                    "avg_conf_py_mean": sum(avg_conf_py_mean)/len(avg_conf_py_mean),
+                    "avg_conf_py_var": sum(avg_conf_py_var)/len(avg_conf_py_var),
+                })
+            print(logging_dict)
 
     if accelerator.process_index == 0:
         logging_dict = {
@@ -493,6 +693,24 @@ def train_one_epoch_consistency(accelerator:accelerate.Accelerator, ftmodel, tra
             "avg_loss":f"{sum(avg_loss)/len(avg_loss)}",
             "avg_closs": sum(avg_closs)/len(avg_closs),
         }
+        if len(avg_proto_loss) > 0:
+            logging_dict.update({
+                "avg_proto_loss": sum(avg_proto_loss)/len(avg_proto_loss),
+                "avg_margin_loss": sum(avg_margin_loss)/len(avg_margin_loss),
+            })
+            if log_geometry_metrics:
+                logging_dict.update({
+                    "avg_proto_margin": sum(avg_proto_margin)/len(avg_proto_margin),
+                    "avg_sim_correct": sum(avg_sim_correct)/len(avg_sim_correct),
+                    "avg_sim_wrong_max": sum(avg_sim_wrong_max)/len(avg_sim_wrong_max),
+                    "avg_feature_consistency": sum(avg_feature_consistency)/len(avg_feature_consistency),
+                })
+        if len(avg_conf_loss) > 0:
+            logging_dict.update({
+                "avg_conf_loss": sum(avg_conf_loss)/len(avg_conf_loss),
+                "avg_conf_py_mean": sum(avg_conf_py_mean)/len(avg_conf_py_mean),
+                "avg_conf_py_var": sum(avg_conf_py_var)/len(avg_conf_py_var),
+            })
 
         logging.info(logging_dict)
         return logging_dict
@@ -675,7 +893,8 @@ def train(args):
             train_logging_dict = train_one_epoch(accelerator, ftmodel, train_data, optimizer, loss_fn, mixup_fn)
         elif args.task == "consistency":
             train_logging_dict = train_one_epoch_consistency(accelerator, ftmodel, train_data, optimizer, loss_fn, mixup_fn=mixup_fn,
-                                                             noise_aug=args.noise_aug, lbd=args.lbd, eta=args.eta
+                                                             noise_aug=args.noise_aug, lbd=args.lbd, eta=args.eta,
+                                                             margin_config=args,
                                                             )
 
         lr_scheduler.step()
