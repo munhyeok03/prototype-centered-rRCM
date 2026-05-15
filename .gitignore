@@ -41,3 +41,9 @@ test_write.txt
 # OS
 .DS_Store
 Thumbs.db
+
+# Local-only helper / draft scripts
+repo_publish_plan.md
+run_experiment.ps1
+run_preliminary_experiment.py
+run_preliminary_rrcm_experiment.py
