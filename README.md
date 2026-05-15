@@ -1,83 +1,59 @@
 # Prototype-Centered rRCM
 
-**An exploratory extension of rRCM that adds prototype alignment to the consistency training objective.**
+This repository is a fork of [rRCM](https://github.com/jiachenlei/rRCM) (Lei et al.) that adds prototype alignment and confidence consistency losses to the rRCM consistency training objective. It contains implementation code and scripts for controlled preliminary experiments only — it is not an official rRCM reproduction and does not provide paper-level results.
 
-> **Attribution:** This repository is a fork of [rRCM](https://github.com/jiachenlei/rRCM) by Jia-Chen Lei et al.
-> The base rRCM code (all files not listed under "What this fork adds") belongs to the original authors.
-> This extension is independent research and is not affiliated with or endorsed by the rRCM authors.
+> The original rRCM README is preserved in [`UPSTREAM_README.md`](UPSTREAM_README.md).
+
+---
+
+## What this is not
+
+- **Not** an official rRCM reproduction
+- **No** official rRCM pre-trained checkpoints (none are publicly available)
+- **No** paper-level certified robustness (experiments use N=1,000; Cohen et al. use N=100,000)
+- **No** full-scale training (experiments use up to 5,000 CIFAR-10 samples)
+
+All results come from a randomly initialized tiny model (embed_dim=64, depth=1, ~70K params). Do not compare absolute numbers to published rRCM results.
 
 ---
 
 ## What this fork adds
 
-### Core implementation
+**Modified files**
 
-| File | Description |
-|------|-------------|
-| `rrcm_tune.py` | Added `confidence_consistency_loss()` and prototype/margin loss integration in `train_one_epoch_consistency` |
+| File | Change |
+|------|--------|
+| `rrcm_tune.py` | Added `confidence_consistency_loss()` and prototype/margin loss hooks in `train_one_epoch_consistency` |
 | `rrcm/utils.py` | Minor diagnostic hook for geometry logging |
-| `experiment_utils.py` | `build_finetune_model`, `load_config`, `set_seed` helpers used by experiment scripts |
 
-### Experiment scripts
+**New files**
 
 | File | Description |
 |------|-------------|
-| `run_preliminary_rrcm_path_v2.py` | Debug-scale ablation (2K train, 7 epochs): baseline vs proto_only vs margin_only vs proto_margin |
-| `run_prototype_generalization_v1.py` | Medium-scale generalization (5K train, 15 epochs): baseline vs proto_only vs proto_margin_B |
-| `run_prototype_confidence_rrcm_v1.py` | Medium-scale confidence consistency study (5K train, 15 epochs): proto_only vs proto_conf — null result |
-| `run_certification_pilot.py` | Diagnostic certification pilot (200 samples, N=1000) |
+| `experiment_utils.py` | `build_finetune_model`, `load_config`, `set_seed` helpers |
 | `smoke_test_margin_aware.py` | 7-item smoke test for all new loss components |
-
-### Config files
-
-| File | Description |
-|------|-------------|
-| `configs/cifar10_rrcm_baseline_margin_experiment.py` | Baseline config for margin/prototype experiments |
-| `configs/cifar10_rrcm_proto_only.py` | proto_only condition config |
-| `configs/cifar10_rrcm_margin_only.py` | margin_only condition config |
-| `configs/cifar10_margin_aware_rrcm.py` | Combined proto+margin config |
-
-### Analysis scripts
-
-| File | Description |
-|------|-------------|
+| `run_preliminary_rrcm_path_v2.py` | Debug-scale ablation: baseline vs proto_only vs margin_only vs proto_margin (2K train, 7 epochs) |
+| `run_prototype_generalization_v1.py` | Medium-scale: baseline vs proto_only vs proto_margin_B (5K train, 15 epochs, 3 seeds) |
+| `run_prototype_confidence_rrcm_v1.py` | Confidence consistency study: proto_only vs proto_conf — null result (5K train, 15 epochs, 3 seeds) |
+| `run_certification_pilot.py` | Diagnostic certification pilot (200 samples, N=1,000) |
 | `analyze_geometry.py` | Post-hoc prototype geometry analysis |
 | `analyze_certification.py` | Certification failure analysis (type-A/B/C breakdown) |
-| `evaluate_metrics.py` | Aggregate metrics from CSVs |
+| `evaluate_metrics.py` | Aggregate metrics from result CSVs |
 | `make_plots.py` | Standalone plot generation |
 | `measure_inference_cost.py` | Wall-clock inference timing |
 | `verify_cuda_env.py` | Environment / CUDA sanity check |
+| `configs/cifar10_rrcm_baseline_margin_experiment.py` | Baseline config |
+| `configs/cifar10_rrcm_proto_only.py` | proto_only config |
+| `configs/cifar10_rrcm_margin_only.py` | margin_only config |
+| `configs/cifar10_margin_aware_rrcm.py` | Combined proto+margin config |
 
 ---
 
-## What this fork does NOT provide
+## Setup
 
-- Official rRCM pre-trained checkpoints (not available publicly)
-- Paper-level certified robustness numbers (experiments use N=1,000; Cohen et al. use N=100,000)
-- Full-scale CIFAR-10 training (experiments use up to 5,000 training samples)
-- Reproduction of original rRCM paper results
-
-All experiment results were obtained with a **randomly initialized tiny model** (embed_dim=64, depth=1, ~70K params). Results are controlled comparisons, not absolute benchmarks.
-
----
-
-## Key findings
-
-**Prototype alignment (proto_only, λp=0.2) consistently improves over the rRCM consistency baseline:**
-
-| Condition | Clean Acc | Noisy σ=0.5 | Proto Margin |
-|-----------|-----------|-------------|--------------|
-| baseline | 18.6±2.8% | 18.4±2.4% | −0.291 |
-| proto_only | 32.7±1.6% | 32.3±1.1% | −0.050 |
-
-**Confidence consistency loss (proto_conf) is a null result** in the random-init regime: softmax outputs remain near-uniform (~0.1/class) throughout training, making the loss constant and its gradient near-zero.
-
----
-
-## Environment setup
+Requires Python 3.9+, CUDA (tested on CUDA 11.x / PyTorch 2.x).
 
 ```bash
-# Requires Python 3.9+ and CUDA (tested on CUDA 11.x / PyTorch 2.x)
 python -m venv .venv
 # Windows:
 .venv\Scripts\activate
@@ -103,10 +79,10 @@ Runs 7 checks: loss forward pass, gradient flow, conf loss constant detection, g
 ## Reproducing experiments
 
 ```bash
-# Debug-scale ablation (fast, ~20 min on GPU)
+# Debug-scale ablation (~20 min on GPU)
 python run_preliminary_rrcm_path_v2.py
 
-# Medium-scale generalization (5K samples, 15 epochs, 3 seeds)
+# Medium-scale generalization (3 seeds, ~2 hr on GPU)
 python run_prototype_generalization_v1.py
 
 # Confidence consistency null result (same scale)
@@ -117,11 +93,15 @@ Results are written to `results/` (excluded from version control).
 
 ---
 
-## Scientific caution
+## Preliminary findings
 
-> This is **not** an official rRCM reproduction.
-> Results use a randomly initialized model with no pre-training.
-> Certified robustness numbers are diagnostic-grade only (N=1,000, not paper-grade N=100,000).
-> Do not compare absolute numbers to published rRCM results.
+These results are from a randomly initialized tiny model in a controlled setting. They are not comparable to published rRCM benchmarks.
 
-The primary contribution is a controlled demonstration that **prototype alignment reduces the near-constant wrong-certified artifact** in the random-init regime, and a documented null result for confidence consistency loss in the same regime.
+**Prototype alignment improves classification over the consistency-only baseline:**
+
+| Condition | Clean Acc | Noisy (σ=0.5) | Proto Margin |
+|-----------|-----------|---------------|--------------|
+| baseline | 18.6±2.8% | 18.4±2.4% | −0.291 |
+| proto_only | 32.7±1.6% | 32.3±1.1% | −0.050 |
+
+**Confidence consistency loss (proto_conf) is a null result** in this regime: with a randomly initialized model, softmax outputs stay near-uniform throughout training (~0.1/class), making the loss approximately constant and its gradient near-zero. This is a regime limitation, not a flaw in the loss formulation.
