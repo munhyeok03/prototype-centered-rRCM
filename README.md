@@ -121,14 +121,14 @@ Generated outputs (CSVs, plots, checkpoints, logs) are written to `results/`, wh
 
 ## Preliminary findings
 
-*These results are from a randomly initialized tiny model (embed_dim=64, depth=1, ~70K params) on a 5K CIFAR-10 subset. Absolute numbers are not comparable to original rRCM paper benchmarks, which use official pre-trained checkpoints and full-scale evaluation.*
+*These results are from randomly initialized tiny models (embed_dim=64, depth=1, ~70K params). They are controlled preliminary experiments, not official rRCM paper benchmarks. Absolute numbers are not comparable to original rRCM results, which require official pre-trained checkpoints and full-scale evaluation.*
 
 Across controlled experiments, prototype alignment was the most consistent positive signal:
 
-- Adding a prototype alignment loss (`proto_only`, λp=0.2) improved clean accuracy by ~14 percentage points and moderate-noise accuracy by ~14 percentage points over the rRCM consistency baseline, while substantially improving prototype geometry (margin: −0.291 → −0.050).
-- The margin separation loss (`margin_only`) improved prototype geometry in isolation but was not a reliable standalone training objective — noisy accuracy degraded compared to baseline.
-- The combined prototype + margin condition (`proto_margin`) performed comparably to `proto_only` with no clear additional gain from the margin component.
-- Confidence consistency was explored as a diagnostic extension (`proto_conf`). It did not provide additional gains over `proto_only` in the current random-initialized setting. Because the softmax outputs remained close to uniform throughout training, the confidence objective did not provide a clearly distinct optimization signal beyond the existing supervised loss. This appears to be a regime limitation rather than a flaw in the loss formulation.
+- **Medium-scale generalization v1** used a 5K train / 1K test CIFAR-10 subset for 15 epochs. In this experiment, `proto_only` used λp=0.1 and improved clean accuracy from 18.6% to 32.7% (+14.1pp) and noisy σ=0.5 accuracy from 18.4% to 32.3% (+13.8pp), while improving prototype margin from −0.291 to −0.050.
+- **Debug-scale ablation v2** used a 2K train / 500 test CIFAR-10 subset for 7 epochs. `margin_only` improved prototype geometry in isolation (prototype margin −0.281 → −0.012) but was not a reliable standalone objective: noisy σ=1.0 accuracy dropped from 19.1% to 15.5%, and noisy σ=2.0 accuracy dropped from 18.6% to 13.1%.
+- The combined prototype + margin conditions performed comparably to `proto_only` with no clear additional gain from the margin component. In medium-scale generalization, `proto_margin_B` used λp=0.2, λm=0.05 and produced clean 32.7%, noisy σ=0.5 32.0%, and prototype margin −0.049.
+- **Confidence consistency v1** used a 5K train / 1K test CIFAR-10 subset for 15 epochs. In this experiment, `proto_only` used λp=0.2, while `proto_conf` used λp=0.2 and λc=0.05. `proto_conf` did not provide additional gains over `proto_only`: clean accuracy was 32.8% vs 32.7%, noisy σ=0.5 accuracy was 32.3% for both, and prototype margin remained −0.050. Because the softmax outputs remained close to uniform, the confidence objective did not provide a clearly distinct optimization signal beyond the existing supervised loss. This appears to be a regime limitation rather than a flaw in the loss formulation.
 
 ---
 
@@ -272,14 +272,14 @@ python run_certification_pilot.py
 
 ## 예비 결과 요약
 
-*이 결과는 무작위 초기화된 소형 모델(embed_dim=64, depth=1, ~70K 파라미터)을 5K CIFAR-10 서브셋에서 학습한 것입니다. 절대적인 수치는 공식 사전학습 체크포인트와 풀스케일 평가를 사용하는 원본 rRCM 논문 벤치마크와 비교할 수 없습니다.*
+*이 결과는 무작위 초기화된 소형 모델(embed_dim=64, depth=1, 약 70K 파라미터)을 사용한 controlled preliminary experiment입니다. 공식 사전학습 checkpoint와 full-scale 평가를 사용하는 원본 rRCM 논문 벤치마크와 절대 수치를 비교할 수 없습니다.*
 
 통제 실험 전반에서 prototype alignment가 가장 일관된 양성 신호였습니다:
 
-- Prototype alignment loss 추가(`proto_only`, λp=0.2)는 rRCM 일관성 baseline 대비 클린 정확도를 약 14%p, 중간 수준 노이즈 정확도를 약 14%p 향상시켰으며, prototype 기하학도 크게 개선했습니다 (margin: −0.291 → −0.050).
-- Margin separation loss(`margin_only`)는 독립적으로 prototype 기하학을 개선했으나 단독 학습 목적함수로는 신뢰할 수 없었습니다 — baseline 대비 노이즈 정확도가 하락했습니다.
-- Prototype + margin 결합 조건(`proto_margin`)은 `proto_only`와 유사한 성능을 보였으며 margin 컴포넌트의 명확한 추가 이득은 없었습니다.
-- Confidence consistency는 진단 확장으로 탐색했습니다(`proto_conf`). 현재 무작위 초기화 설정에서 `proto_only` 대비 추가 이득을 제공하지 않았습니다. 학습 전반에 걸쳐 softmax 출력이 균등 분포에 가깝게 유지되어, confidence 목적함수가 기존 지도 학습 손실 이상의 명확히 구별되는 최적화 신호를 제공하지 못했기 때문으로 보입니다. 이는 loss 공식의 결함이 아닌 현재 학습 regime의 한계로 판단됩니다.
+- **Medium-scale generalization v1**은 CIFAR-10 5K train / 1K test subset, 15 epochs로 수행되었습니다. 이 실험의 `proto_only`는 λp=0.1을 사용했으며, clean accuracy를 18.6%에서 32.7%로(+14.1pp), noisy σ=0.5 accuracy를 18.4%에서 32.3%로(+13.8pp) 개선했습니다. Prototype margin도 −0.291에서 −0.050으로 개선되었습니다.
+- **Debug-scale ablation v2**는 CIFAR-10 2K train / 500 test subset, 7 epochs로 수행되었습니다. `margin_only`는 단독으로 prototype geometry를 개선했지만(prototype margin −0.281 → −0.012), 신뢰할 수 있는 단독 목적함수는 아니었습니다. Noisy σ=1.0 accuracy는 19.1%에서 15.5%로, noisy σ=2.0 accuracy는 18.6%에서 13.1%로 하락했습니다.
+- Prototype + margin 결합 조건은 `proto_only`와 유사한 성능을 보였으며 margin 컴포넌트의 명확한 추가 이득은 없었습니다. Medium-scale generalization에서 `proto_margin_B`는 λp=0.2, λm=0.05를 사용했고 clean 32.7%, noisy σ=0.5 32.0%, prototype margin −0.049를 기록했습니다.
+- **Confidence consistency v1**은 CIFAR-10 5K train / 1K test subset, 15 epochs로 수행되었습니다. 이 실험의 `proto_only`는 λp=0.2를, `proto_conf`는 λp=0.2와 λc=0.05를 사용했습니다. `proto_conf`는 `proto_only` 대비 추가 이득을 제공하지 않았습니다: clean accuracy는 32.8% vs 32.7%, noisy σ=0.5 accuracy는 둘 다 32.3%, prototype margin은 둘 다 −0.050 수준이었습니다. Softmax 출력이 균등 분포에 가깝게 유지되어 confidence 목적함수가 기존 supervised loss와 구별되는 추가 최적화 신호를 충분히 제공하지 못한 것으로 해석합니다.
 
 ---
 
